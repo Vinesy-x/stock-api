@@ -3,16 +3,18 @@ from http.server import BaseHTTPRequestHandler
 import json
 import urllib.request
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 北京时间 UTC+8
+CST = timezone(timedelta(hours=8))
 import re
 
-# 股票池
-STOCK_POOL = {
+# 股票�?STOCK_POOL = {
     '002174': '游族网络', '002517': '恺英网络', '002555': '三七互娱',
     '002558': '巨人网络', '002292': '奥飞娱乐', '603258': '电魂网络',
     '002460': '赣锋锂业', '002466': '天齐锂业', '600995': '南网储能',
     '601222': '林洋能源', '600905': '三峡能源', '002240': '盛新锂能',
-    '600570': '恒生电子', '600877': '电科芯片', '603068': '博通集成',
+    '600570': '恒生电子', '600877': '电科芯片', '603068': '博通集�?,
     '002138': '顺络电子', '603678': '火炬电子', '601231': '环旭电子',
     '000425': '徐工机械', '002031': '巨轮智能', '601615': '明阳智能',
     '002097': '山河智能', '603011': '合锻智能', '000977': '浪潮信息',
@@ -160,7 +162,7 @@ def run_backtest(start_date, end_date):
                     pos = positions[code]
                     amount = pos['shares'] * today['close']
                     profit = (today['close'] - pos['cost']) * pos['shares']
-                    now = datetime.now()
+                    now = datetime.now(CST)
                     trade_time = f"{date} {9 + (day_idx % 4)}:{30 + (len(trades) * 7) % 30:02d}"
                     trades.append({
                         'datetime': trade_time, 'action': 'sell', 'code': code,
@@ -226,7 +228,7 @@ class handler(BaseHTTPRequestHandler):
         
         if path == '/api/backtest' or 'start' in query:
             start = query.get('start', ['2026-02-02'])[0]
-            end = query.get('end', [datetime.now().strftime('%Y-%m-%d')])[0]
+            end = query.get('end', [datetime.now(CST).strftime('%Y-%m-%d')])[0]
             data = run_backtest(start, end)
         else:
             quotes = get_quotes()
@@ -234,7 +236,7 @@ class handler(BaseHTTPRequestHandler):
             buy_signals = [s for s in stocks if s['change_pct'] > 3][:3]
             sell_signals = [s for s in stocks if s['change_pct'] < -2][:3]
             data = {
-                'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'update_time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
                 'stocks': stocks, 'buy_signals': buy_signals, 'sell_signals': sell_signals,
             }
         
