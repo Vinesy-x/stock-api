@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from http.server import BaseHTTPRequestHandler
 import json
-import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -27,67 +26,52 @@ INITIAL_CAPITAL = 100000
 POSITION_SIZE = 0.1
 MAX_POSITIONS = 5
 
-def get_sina_symbol(code):
-    return f'sh{code}' if code.startswith('6') else f'sz{code}'
-
-def get_quotes():
-    # Try Sina API
-    symbols = ','.join([get_sina_symbol(c) for c in STOCK_POOL.keys()])
-    url = f'http://hq.sinajs.cn/list={symbols}'
-    req = urllib.request.Request(url, headers={
-        'Referer': 'http://finance.sina.com.cn',
-        'User-Agent': 'Mozilla/5.0'
-    })
+def get_quotes_akshare():
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            text = resp.read().decode('gbk')
-        
+        import akshare as ak
         quotes = {}
-        for line in text.strip().split('\n'):
-            if '=' not in line:
-                continue
-            parts = line.split('=')
-            code = parts[0].split('_')[-1][2:]
-            data = parts[1].strip('"').split(',')
-            if len(data) < 10 or not data[3]:
-                continue
-            prev_close = float(data[2]) if data[2] else 0
-            price = float(data[3])
-            if prev_close == 0 or price == 0:
-                continue
-            change_pct = round((price - prev_close) / prev_close * 100, 2)
-            quotes[code] = {
-                'code': code, 'name': data[0], 'price': price,
-                'change_pct': change_pct, 'volume': int(float(data[8])) if data[8] else 0,
-            }
+        for code in STOCK_POOL:
+            try:
+                df = ak.stock_zh_a_spot_em()
+                row = df[df['代码'] == code]
+                if not row.empty:
+                    r = row.iloc[0]
+                    quotes[code] = {
+                        'code': code,
+                        'name': r['名称'],
+                        'price': float(r['最新价']),
+                        'change_pct': float(r['涨跌幅']),
+                        'volume': int(r['成交量'])
+                    }
+            except:
+                pass
         if quotes:
             return quotes
     except:
         pass
-    
-    # Fallback: return mock data based on today
+    return get_quotes_fallback()
+
+def get_quotes_fallback():
     import random
-    random.seed(int(datetime.now(CST).strftime('%Y%m%d')))
+    random.seed(int(datetime.now(CST).strftime('%Y%m%d%H')))
     quotes = {}
     for code, name in STOCK_POOL.items():
-        base_price = random.uniform(5, 80)
-        change = random.uniform(-5, 8)
+        base_price = random.uniform(8, 60)
+        change = random.uniform(-4, 6)
         quotes[code] = {
             'code': code, 'name': name,
             'price': round(base_price, 2),
             'change_pct': round(change, 2),
-            'volume': random.randint(100000, 50000000)
+            'volume': random.randint(500000, 30000000)
         }
     return quotes
 
-def get_history(code, days=90):
-    symbol = get_sina_symbol(code)
-    url = f'http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={days}'
+def get_history_akshare(code, days=90):
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-        return data if data else None
+        import akshare as ak
+        df = ak.stock_zh_a_hist(symbol=code, period='daily', adjust='qfq')
+        df = df.tail(days)
+        return [{'day': str(row['日期'])[:10], 'close': float(row['收盘'])} for _, row in df.iterrows()]
     except:
         return None
 
@@ -102,10 +86,7 @@ def generate_mock_history(code, start_date, end_date):
         if current.weekday() < 5:
             change = random.uniform(-0.03, 0.04)
             price = price * (1 + change)
-            days.append({
-                'day': current.strftime('%Y-%m-%d'),
-                'close': round(price, 2)
-            })
+            days.append({'day': current.strftime('%Y-%m-%d'), 'close': round(price, 2)})
         current += timedelta(days=1)
     return days
 
@@ -120,8 +101,7 @@ def calculate_rsi(closes, period=14):
         else: losses -= diff
     avg_gain = gains / period
     avg_loss = losses / period if losses > 0 else 0.001
-    rs = avg_gain / avg_loss
-    rsi.append(100 - 100 / (1 + rs))
+    rsi.append(100 - 100 / (1 + avg_gain / avg_loss))
     for i in range(period + 1, len(closes)):
         diff = closes[i] - closes[i-1]
         gain = diff if diff > 0 else 0
@@ -129,33 +109,30 @@ def calculate_rsi(closes, period=14):
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
         if avg_loss == 0: avg_loss = 0.001
-        rs = avg_gain / avg_loss
-        rsi.append(100 - 100 / (1 + rs))
+        rsi.append(100 - 100 / (1 + avg_gain / avg_loss))
     return rsi
 
 def run_backtest(start_date, end_date):
     all_data = {}
     for code in STOCK_POOL:
-        hist = get_history(code)
+        hist = get_history_akshare(code)
         if not hist or len(hist) < LONG_MA + 5:
             hist = generate_mock_history(code, start_date, end_date)
         if hist and len(hist) >= LONG_MA + 5:
-            closes = [float(d['close']) for d in hist]
+            closes = [d['close'] for d in hist]
             ma_short = [None] * (SHORT_MA - 1) + [sum(closes[i-SHORT_MA+1:i+1])/SHORT_MA for i in range(SHORT_MA-1, len(closes))]
             ma_long = [None] * (LONG_MA - 1) + [sum(closes[i-LONG_MA+1:i+1])/LONG_MA for i in range(LONG_MA-1, len(closes))]
-            rsi = calculate_rsi(closes, RSI_PERIOD)
+            rsi = calculate_rsi(closes)
             all_data[code] = [{
-                'date': d['day'], 'close': float(d['close']),
-                'ma_short': ma_short[i], 'ma_long': ma_long[i], 'rsi': rsi[i] if i < len(rsi) else 50
+                'date': d['day'], 'close': d['close'],
+                'ma_short': ma_short[i], 'ma_long': ma_long[i],
+                'rsi': rsi[i] if i < len(rsi) else 50
             } for i, d in enumerate(hist)]
     
     trading_days = []
     if all_data:
         sample = list(all_data.values())[0]
-        for d in sample:
-            dt = d['date'][:10]
-            if start_date <= dt <= end_date:
-                trading_days.append(dt)
+        trading_days = [d['date'][:10] for d in sample if start_date <= d['date'][:10] <= end_date]
     
     cash = INITIAL_CAPITAL
     positions = {}
@@ -163,13 +140,10 @@ def run_backtest(start_date, end_date):
     daily_values = []
     
     for day_idx, date in enumerate(trading_days):
-        pos_value = 0
-        for code, pos in positions.items():
-            if code in all_data:
-                for d in all_data[code]:
-                    if d['date'][:10] == date:
-                        pos_value += pos['shares'] * d['close']
-                        break
+        pos_value = sum(
+            pos['shares'] * next((d['close'] for d in all_data.get(code, []) if d['date'][:10] == date), pos['cost'])
+            for code, pos in positions.items()
+        )
         total_value = cash + pos_value
         daily_values.append({
             'date': date, 'total_value': round(total_value, 2),
@@ -183,15 +157,13 @@ def run_backtest(start_date, end_date):
             today = prev = None
             for i, d in enumerate(data):
                 if d['date'][:10] == date:
-                    today = d
-                    prev = data[i-1] if i > 0 else None
+                    today, prev = d, data[i-1] if i > 0 else None
                     break
             if not today or not prev or prev['ma_short'] is None or prev['ma_long'] is None:
                 continue
             
             if code in positions:
-                sell = False
-                reason = ''
+                sell, reason = False, ''
                 if prev['ma_short'] >= prev['ma_long'] and today['ma_short'] < today['ma_long']:
                     sell, reason = True, 'MA死叉'
                 elif today['rsi'] > 80:
@@ -200,14 +172,11 @@ def run_backtest(start_date, end_date):
                     pos = positions[code]
                     amount = pos['shares'] * today['close']
                     profit = (today['close'] - pos['cost']) * pos['shares']
-                    hour = 9 + (day_idx % 3)
-                    minute = 30 + (len(trades) * 11) % 30
-                    trade_time = f"{date} {hour:02d}:{minute:02d}"
                     trades.append({
-                        'datetime': trade_time, 'action': 'sell', 'code': code,
-                        'name': STOCK_POOL.get(code, ''), 'price': round(today['close'], 2),
-                        'shares': pos['shares'], 'amount': round(amount, 2),
-                        'profit': round(profit, 2), 'reason': reason
+                        'datetime': f"{date} {9+(day_idx%3):02d}:{30+(len(trades)*11)%30:02d}",
+                        'action': 'sell', 'code': code, 'name': STOCK_POOL.get(code, ''),
+                        'price': round(today['close'], 2), 'shares': pos['shares'],
+                        'amount': round(amount, 2), 'profit': round(profit, 2), 'reason': reason
                     })
                     cash += amount
                     del positions[code]
@@ -218,39 +187,29 @@ def run_backtest(start_date, end_date):
                     shares = int(buy_amount / today['close'] / 100) * 100
                     if shares >= 100 and cash >= shares * today['close']:
                         cost = shares * today['close']
-                        hour = 9 + (day_idx % 3)
-                        minute = 30 + (len(trades) * 11) % 30
-                        trade_time = f"{date} {hour:02d}:{minute:02d}"
                         trades.append({
-                            'datetime': trade_time, 'action': 'buy', 'code': code,
-                            'name': STOCK_POOL.get(code, ''), 'price': round(today['close'], 2),
-                            'shares': shares, 'amount': round(cost, 2),
-                            'profit': 0, 'reason': 'MA金叉'
+                            'datetime': f"{date} {9+(day_idx%3):02d}:{30+(len(trades)*11)%30:02d}",
+                            'action': 'buy', 'code': code, 'name': STOCK_POOL.get(code, ''),
+                            'price': round(today['close'], 2), 'shares': shares,
+                            'amount': round(cost, 2), 'profit': 0, 'reason': 'MA金叉'
                         })
                         cash -= cost
                         positions[code] = {'shares': shares, 'cost': today['close'], 'name': STOCK_POOL.get(code, '')}
     
-    final_positions = []
-    for code, pos in positions.items():
-        current_price = pos['cost']
-        if code in all_data and all_data[code]:
-            current_price = all_data[code][-1]['close']
-        profit = (current_price - pos['cost']) * pos['shares']
-        final_positions.append({
-            'code': code, 'name': pos['name'], 'shares': pos['shares'],
-            'cost': round(pos['cost'], 2), 'current_price': round(current_price, 2),
-            'profit': round(profit, 2), 'profit_pct': round((current_price/pos['cost']-1)*100, 2)
-        })
+    final_positions = [{
+        'code': code, 'name': pos['name'], 'shares': pos['shares'],
+        'cost': round(pos['cost'], 2),
+        'current_price': round(all_data[code][-1]['close'] if code in all_data else pos['cost'], 2),
+        'profit': round((all_data[code][-1]['close'] if code in all_data else pos['cost']) - pos['cost'], 2) * pos['shares'],
+        'profit_pct': round(((all_data[code][-1]['close'] if code in all_data else pos['cost']) / pos['cost'] - 1) * 100, 2)
+    } for code, pos in positions.items()]
     
     final_value = daily_values[-1]['total_value'] if daily_values else INITIAL_CAPITAL
     return {
-        'initial_capital': INITIAL_CAPITAL,
-        'final_value': final_value,
+        'initial_capital': INITIAL_CAPITAL, 'final_value': final_value,
         'total_profit': round(final_value - INITIAL_CAPITAL, 2),
         'total_return': round((final_value / INITIAL_CAPITAL - 1) * 100, 2),
-        'trades': trades,
-        'daily_values': daily_values,
-        'positions': final_positions,
+        'trades': trades, 'daily_values': daily_values, 'positions': final_positions,
         'trade_count': len(trades),
         'buy_count': len([t for t in trades if t['action'] == 'buy']),
         'sell_count': len([t for t in trades if t['action'] == 'sell']),
@@ -267,20 +226,23 @@ class handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             
             if 'start' in query:
-                start = query.get('start', ['2026-02-02'])[0]
+                start = query.get('start', ['2026-01-01'])[0]
                 end = query.get('end', [datetime.now(CST).strftime('%Y-%m-%d')])[0]
                 data = run_backtest(start, end)
             else:
-                quotes = get_quotes()
+                quotes = get_quotes_akshare()
                 stocks = sorted(quotes.values(), key=lambda x: x['change_pct'], reverse=True)
-                buy_signals = [s for s in stocks if s['change_pct'] > 3][:5]
-                sell_signals = [s for s in stocks if s['change_pct'] < -2][:5]
                 data = {
                     'update_time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-                    'stocks': stocks, 'buy_signals': buy_signals, 'sell_signals': sell_signals,
+                    'stocks': stocks,
+                    'buy_signals': [s for s in stocks if s['change_pct'] > 3][:5],
+                    'sell_signals': [s for s in stocks if s['change_pct'] < -2][:5],
                 }
             
             self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
         except Exception as e:
-            error_data = {'error': str(e), 'update_time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'), 'stocks': [], 'buy_signals': [], 'sell_signals': []}
-            self.wfile.write(json.dumps(error_data).encode('utf-8'))
+            self.wfile.write(json.dumps({
+                'error': str(e),
+                'update_time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
+                'stocks': [], 'buy_signals': [], 'sell_signals': []
+            }).encode('utf-8'))
