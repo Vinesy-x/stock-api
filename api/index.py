@@ -5,16 +5,15 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-# 北京时间 UTC+8
+# Beijing Time UTC+8
 CST = timezone(timedelta(hours=8))
-import re
 
-# 股票�?STOCK_POOL = {
+STOCK_POOL = {
     '002174': '游族网络', '002517': '恺英网络', '002555': '三七互娱',
     '002558': '巨人网络', '002292': '奥飞娱乐', '603258': '电魂网络',
     '002460': '赣锋锂业', '002466': '天齐锂业', '600995': '南网储能',
     '601222': '林洋能源', '600905': '三峡能源', '002240': '盛新锂能',
-    '600570': '恒生电子', '600877': '电科芯片', '603068': '博通集�?,
+    '600570': '恒生电子', '600877': '电科芯片', '603068': '博通集成',
     '002138': '顺络电子', '603678': '火炬电子', '601231': '环旭电子',
     '000425': '徐工机械', '002031': '巨轮智能', '601615': '明阳智能',
     '002097': '山河智能', '603011': '合锻智能', '000977': '浪潮信息',
@@ -81,8 +80,8 @@ def calculate_rsi(closes, period=14):
         if diff > 0: gains += diff
         else: losses -= diff
     avg_gain = gains / period
-    avg_loss = losses / period
-    rs = avg_gain / avg_loss if avg_loss != 0 else 100
+    avg_loss = losses / period if losses > 0 else 0.001
+    rs = avg_gain / avg_loss
     rsi.append(100 - 100 / (1 + rs))
     for i in range(period + 1, len(closes)):
         diff = closes[i] - closes[i-1]
@@ -90,7 +89,8 @@ def calculate_rsi(closes, period=14):
         loss = -diff if diff < 0 else 0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
-        rs = avg_gain / avg_loss if avg_loss != 0 else 100
+        if avg_loss == 0: avg_loss = 0.001
+        rs = avg_gain / avg_loss
         rsi.append(100 - 100 / (1 + rs))
     return rsi
 
@@ -105,7 +105,7 @@ def run_backtest(start_date, end_date):
             rsi = calculate_rsi(closes, RSI_PERIOD)
             all_data[code] = [{
                 'date': d['day'], 'close': float(d['close']),
-                'ma_short': ma_short[i], 'ma_long': ma_long[i], 'rsi': rsi[i]
+                'ma_short': ma_short[i], 'ma_long': ma_long[i], 'rsi': rsi[i] if i < len(rsi) else 50
             } for i, d in enumerate(hist)]
     
     trading_days = []
@@ -150,7 +150,6 @@ def run_backtest(start_date, end_date):
             if not today or not prev or prev['ma_short'] is None or prev['ma_long'] is None:
                 continue
             
-            # Sell signal
             if code in positions:
                 sell = False
                 reason = ''
@@ -162,7 +161,6 @@ def run_backtest(start_date, end_date):
                     pos = positions[code]
                     amount = pos['shares'] * today['close']
                     profit = (today['close'] - pos['cost']) * pos['shares']
-                    now = datetime.now(CST)
                     trade_time = f"{date} {9 + (day_idx % 4)}:{30 + (len(trades) * 7) % 30:02d}"
                     trades.append({
                         'datetime': trade_time, 'action': 'sell', 'code': code,
@@ -173,7 +171,6 @@ def run_backtest(start_date, end_date):
                     cash += amount
                     del positions[code]
             
-            # Buy signal
             elif len(positions) < MAX_POSITIONS:
                 if prev['ma_short'] <= prev['ma_long'] and today['ma_short'] > today['ma_long'] and today['rsi'] < 70:
                     buy_amount = cash * POSITION_SIZE
@@ -223,21 +220,24 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         
-        path = self.path.split('?')[0]
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        
-        if path == '/api/backtest' or 'start' in query:
-            start = query.get('start', ['2026-02-02'])[0]
-            end = query.get('end', [datetime.now(CST).strftime('%Y-%m-%d')])[0]
-            data = run_backtest(start, end)
-        else:
-            quotes = get_quotes()
-            stocks = sorted(quotes.values(), key=lambda x: x['change_pct'], reverse=True)
-            buy_signals = [s for s in stocks if s['change_pct'] > 3][:3]
-            sell_signals = [s for s in stocks if s['change_pct'] < -2][:3]
-            data = {
-                'update_time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-                'stocks': stocks, 'buy_signals': buy_signals, 'sell_signals': sell_signals,
-            }
-        
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        try:
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            
+            if 'start' in query:
+                start = query.get('start', ['2026-02-02'])[0]
+                end = query.get('end', [datetime.now(CST).strftime('%Y-%m-%d')])[0]
+                data = run_backtest(start, end)
+            else:
+                quotes = get_quotes()
+                stocks = sorted(quotes.values(), key=lambda x: x['change_pct'], reverse=True)
+                buy_signals = [s for s in stocks if s['change_pct'] > 3][:3]
+                sell_signals = [s for s in stocks if s['change_pct'] < -2][:3]
+                data = {
+                    'update_time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
+                    'stocks': stocks, 'buy_signals': buy_signals, 'sell_signals': sell_signals,
+                }
+            
+            self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            error_data = {'error': str(e)}
+            self.wfile.write(json.dumps(error_data).encode('utf-8'))
